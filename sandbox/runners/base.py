@@ -70,7 +70,8 @@ async def run_command_bare(command: str | List[str],
             try:
                 if p.stdin:
                     p.stdin.write(stdin.encode())
-                    p.stdin.flush()
+                    # p.stdin.flush()
+                    await p.stdin.drain()  # ✅ 使用 drain() 而不是 flush()
                 else:
                     logger.warning("Attempted to write to stdin, but stdin is closed.")
             except Exception as e:
@@ -78,6 +79,7 @@ async def run_command_bare(command: str | List[str],
         if p.stdin:
             try:
                 p.stdin.close()
+                await p.stdin.wait_closed()  # ✅ 等待关闭完成
             except Exception as e:
                 logger.warning(f"Failed to close stdin: {e}")
         start_time = time.time()

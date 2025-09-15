@@ -17,7 +17,8 @@ RUN apt-get update && \
     openssh-server && \
     apt-get clean
 
-
+# 添加一个构建参数来破坏缓存
+ARG CACHE_BUST=1
 
 RUN git clone https://github.com/Challenging6/SandboxFusion.git  /tmp/sandbox_new
 RUN cp -rf /tmp/sandbox_new/* /root/sandbox/ && \

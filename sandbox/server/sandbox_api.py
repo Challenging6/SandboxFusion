@@ -46,6 +46,7 @@ class RunCodeRequest(BaseModel):
     language: Language = Field(..., examples=['python'], description='the language or execution mode to run the code')
     files: Dict[str, Optional[str]] = Field({}, description='a dict from file path to base64 encoded file content')
     fetch_files: List[str] = Field([], description='a list of file paths to fetch after code execution')
+    ## 新增参数 用于校验
     argv: Optional[List[str]] = Field([], examples=['["1", "2", "3"]'], description='optional list of arguments to pass into the code')
     check_code: Optional[str] = Field(None, examples=['print("hello")'], description='the code to check')
 

@@ -9,6 +9,7 @@ __pycache__/
 *.so
 *.a
 
+tests/
 # Distribution / packaging
 .Python
 build/
