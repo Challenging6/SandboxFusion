@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 from functools import cache
-
+import shlex
 import structlog
 
 from sandbox.configs.run_config import RunConfig
@@ -100,6 +100,22 @@ async def run_cpp(args: CodeRunArgs) -> CodeRunResult:
             f.write(args.code)
 
         return await run_commands(f'g++ -std=c++17 {f.name} -o test {" ".join(flags)}', './test', tmp_dir, {}, args)
+
+
+async def run_cpp_check(args: CodeRunArgs) -> CodeRunResult:
+    flags = await get_cpp_rt_flags()
+    with tempfile.TemporaryDirectory(dir=get_tmp_dir(), ignore_cleanup_errors=True) as tmp_dir:
+        restore_files(tmp_dir, args.files)
+        with tempfile.NamedTemporaryFile(mode='w', dir=tmp_dir, suffix='.cpp', delete=False) as f:
+            f.write(args.code)
+
+        # 构建带参数的运行命令
+        argv = args.argv # 获取参数列表，默认为空
+        # 对参数进行转义以防止注入
+        escaped_argv = [shlex.quote(arg) for arg in argv]
+        run_cmd = './test' + (' ' + ' '.join(escaped_argv) if escaped_argv else '')
+        
+        return await run_commands(f'g++ -std=c++17 {f.name} -o test {" ".join(flags)}', run_cmd, tmp_dir, {}, args)
 
 
 async def run_csharp(args: CodeRunArgs) -> CodeRunResult:
@@ -237,6 +253,7 @@ async def run_bash(args: CodeRunArgs) -> CodeRunResult:
 
 MAJOR_RUNNERS = {
     'cpp': run_cpp,
+    'cpp_check': run_cpp_check,   # add testlib checker(https://codeforces.com/testlib)
     'go': run_go,
     'go_test': run_go_test,
     'java': run_java,

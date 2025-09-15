@@ -34,6 +34,7 @@ class CommandRunResult(BaseModel):
 
 class CodeRunArgs(BaseModel):
     code: str
+    argv: List[str] = []
     files: Dict[str, Optional[str]] = {}
     compile_timeout: float = 10
     run_timeout: float = 10
