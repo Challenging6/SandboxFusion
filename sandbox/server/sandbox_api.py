@@ -138,9 +138,7 @@ async def run_check_code(request: RunCodeRequest):
     '''
     resp = RunCodeResponse(status=RunStatus.Success, message='', executor_pod_name=os.environ.get('MY_POD_NAME'))
     try:
-        logger.debug(
-            f'start processing {request.language} request with code ```\n{request.code[:100]}\n``` and files {list(request.files.keys())}...(memory_limit: {request.memory_limit_MB}MB)'
-        )
+        logger.debug(f'start processing {request.language} request with code ```\n{request.code[:100]}\n``` and files {list(request.files.keys())}...(memory_limit: {request.memory_limit_MB}MB)')
         result = await CODE_RUNNERS[request.language](CodeRunArgs(**request.model_dump()))
 
         resp.compile_result = result.compile_result
@@ -168,15 +166,13 @@ async def run_check_code(request: RunCodeRequest):
 
     # 执行成功，对stdout进行校验
     try:
-        logger.debug(
-            f'start check with code ```\n{request.check_code[:100]}\n``` and files {list(request.files.keys())}...(memory_limit: {request.memory_limit_MB}MB)'
-        )
-
         check_args = request.model_dump()
         check_args['code'] = request.check_code
         check_args['files']['input.txt']  = base64.b64encode(request.stdin.encode()).decode()
         check_args['files']['output.txt'] = base64.b64encode(resp.run_result.stdout.encode()).decode()
+        logger.debug(f'start check with code ```\n{check_args["code"][:100]}\n``` and files {list(check_args['files'].keys())}...(memory_limit: {request.memory_limit_MB}MB)')
         result = await CODE_RUNNERS['cpp_check'](CodeRunArgs(**check_args))
+        print(result)
         resp.check_result = result
 
     except Exception as e:

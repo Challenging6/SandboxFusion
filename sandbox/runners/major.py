@@ -108,13 +108,10 @@ async def run_cpp_check(args: CodeRunArgs) -> CodeRunResult:
         restore_files(tmp_dir, args.files)
         with tempfile.NamedTemporaryFile(mode='w', dir=tmp_dir, suffix='.cpp', delete=False) as f:
             f.write(args.code)
-
-        # 构建带参数的运行命令
         argv = args.argv # 获取参数列表，默认为空
-        # 对参数进行转义以防止注入
-        escaped_argv = [shlex.quote(arg) for arg in argv]
+        escaped_argv = [shlex.quote(arg) for arg in argv] # 对参数进行转义以防止注入
         run_cmd = './test' + (' ' + ' '.join(escaped_argv) if escaped_argv else '')
-        
+
         return await run_commands(f'g++ -std=c++17 {f.name} -o test {" ".join(flags)}', run_cmd, tmp_dir, {}, args)
 
 
