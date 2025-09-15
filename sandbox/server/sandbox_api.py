@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from tabnanny import check
 import traceback
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -60,6 +61,12 @@ class RunStatus(str, Enum):
     SandboxError = 'SandboxError'
 
 
+class CheckCodeResult(BaseModel):
+    status: RunStatus
+    message: str
+    compile_result: Optional[CommandRunResult] = None
+    run_result: Optional[CommandRunResult] = None
+
 class RunCodeResponse(BaseModel):
     status: RunStatus
     message: str
@@ -67,7 +74,7 @@ class RunCodeResponse(BaseModel):
     run_result: Optional[CommandRunResult] = None
     executor_pod_name: Optional[str] = None
     files: Dict[str, str] = {}
-    check_result: Optional[CommandRunResult] = None
+    check_result: Optional[CheckCodeResult] = None
 
 
 class RunJupyterResponse(BaseModel):
@@ -171,9 +178,18 @@ async def run_check_code(request: RunCodeRequest):
         check_args['files']['input.txt']  = base64.b64encode(request.stdin.encode()).decode()
         check_args['files']['output.txt'] = base64.b64encode(resp.run_result.stdout.encode()).decode()
         logger.debug(f'start check with code ```\n{check_args["code"][:100]}\n``` and files {list(check_args["files"].keys())}...(memory_limit: {request.memory_limit_MB}MB)')
-        result = await CODE_RUNNERS['cpp_check'](CodeRunArgs(**check_args))
-        print(result)
-        resp.check_result = result
+        check_exec_result = await CODE_RUNNERS['cpp_check'](CodeRunArgs(**check_args))
+    
+        check_status, check_message = parse_run_status(check_exec_result)
+
+        check_result = CheckCodeResult(
+            status=check_status,
+            message='' if check_status != RunStatus.SandboxError else check_message,
+            compile_result=check_exec_result.compile_result,
+            run_result=check_exec_result.run_result,
+        )
+
+        resp.check_result = check_result
 
     except Exception as e:
         message = f'exception on checking code {request.check_code}: {e} {traceback.print_tb(e.__traceback__)}'
