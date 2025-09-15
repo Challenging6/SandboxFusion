@@ -1,0 +1,55 @@
+FROM vemlp-cn-beijing.cr.volces.com/preset-images/code-sandbox:server-20250609
+
+# 设置为非交互模式
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装必要的工具
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    tmux \
+    zsh \
+    rclone \
+    htop \
+    net-tools \
+    iproute2 \
+    iperf3 \
+    traceroute \
+    openssh-server \
+    rsync && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 创建备份目录（可选，如果需要备份原有文件）
+RUN mkdir -p /root/sandbox_backup
+
+# 备份原有的 /root/sandbox 目录（可选）
+RUN if [ -d "/root/sandbox" ]; then \
+        cp -r /root/sandbox/* /root/sandbox_backup/ 2>/dev/null || true; \
+    fi
+
+# 克隆新的仓库到临时位置
+RUN git clone https://github.com/Challenging6/SandboxFusion.git /tmp/sandbox_new
+
+# 确保目标目录存在
+RUN mkdir -p /root/sandbox
+
+# 将克隆的文件覆盖到 /root/sandbox
+# 使用 rsync 进行文件同步，可以更好地处理文件覆盖
+RUN rsync -av --delete /tmp/sandbox_new/ /root/sandbox/
+
+# 或者使用 cp 命令进行覆盖（注释掉上面的 rsync 行，启用下面的 cp 行）
+# RUN cp -rf /tmp/sandbox_new/* /root/sandbox/ && \
+#     cp -rf /tmp/sandbox_new/.* /root/sandbox/ 2>/dev/null || true
+
+# 清理临时目录
+RUN rm -rf /tmp/sandbox_new
+
+# 设置工作目录
+WORKDIR /root/sandbox
+
+# 设置正确的权限
+RUN chmod +x /root/sandbox/scripts/run.sh
+
+# 启动服务
+CMD ["bash", "/root/sandbox/scripts/run.sh"]
