@@ -16,7 +16,7 @@ import os
 import traceback
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
-
+import base64
 import structlog
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -43,10 +43,11 @@ class RunCodeRequest(BaseModel):
     memory_limit_MB: int = Field(-1, description='maximum memory allowed in megabytes')
     code: str = Field(..., examples=['print("hello")'], description='the code to run')
     stdin: Optional[str] = Field(None, examples=[''], description='optional string to pass into stdin')
-    argv: Optional[List[str]] = Field([], examples=['["1", "2", "3"]'], description='optional list of arguments to pass into the code')
     language: Language = Field(..., examples=['python'], description='the language or execution mode to run the code')
     files: Dict[str, Optional[str]] = Field({}, description='a dict from file path to base64 encoded file content')
     fetch_files: List[str] = Field([], description='a list of file paths to fetch after code execution')
+    argv: Optional[List[str]] = Field([], examples=['["1", "2", "3"]'], description='optional list of arguments to pass into the code')
+    check_code: Optional[str] = Field(None, examples=['print("hello")'], description='the code to check')
 
 
 class RunStatus(str, Enum):
@@ -65,6 +66,7 @@ class RunCodeResponse(BaseModel):
     run_result: Optional[CommandRunResult] = None
     executor_pod_name: Optional[str] = None
     files: Dict[str, str] = {}
+    check_result: Optional[CommandRunResult] = None
 
 
 class RunJupyterResponse(BaseModel):
@@ -119,6 +121,65 @@ async def run_code(request: RunCodeRequest):
             resp.message = message
     except Exception as e:
         message = f'exception on running code {request.code}: {e} {traceback.print_tb(e.__traceback__)}'
+        logger.warning(message)
+        resp.message = message
+        resp.status = RunStatus.SandboxError
+
+    return resp
+
+
+@sandbox_router.post("/run_check_code", response_model=RunCodeResponse, tags=['sandbox'])
+async def run_check_code(request: RunCodeRequest):
+    '''
+    实现基于testlib的代码执行（支持多语言）+ 基于checker(cpp)的校验。
+
+    checker(https://codeforces.com/testlib)
+    '''
+    resp = RunCodeResponse(status=RunStatus.Success, message='', executor_pod_name=os.environ.get('MY_POD_NAME'))
+    try:
+        logger.debug(
+            f'start processing {request.language} request with code ```\n{request.code[:100]}\n``` and files {list(request.files.keys())}...(memory_limit: {request.memory_limit_MB}MB)'
+        )
+        result = await CODE_RUNNERS[request.language](CodeRunArgs(**request.model_dump()))
+
+        resp.compile_result = result.compile_result
+        resp.run_result = result.run_result
+        resp.files = result.files
+        resp.status, message = parse_run_status(result)
+        if resp.status == RunStatus.SandboxError:
+            resp.message = message
+    except Exception as e:
+        message = f'exception on running code {request.code}: {e} {traceback.print_tb(e.__traceback__)}'
+        logger.warning(message)
+        resp.message = message
+        resp.status = RunStatus.SandboxError
+        return resp
+
+    # 编译失败, 直接返回
+    if resp.compile_result is not None and (
+        resp.compile_result.status != CommandRunStatus.Finished 
+        or resp.compile_result.return_code != 0):
+        return resp
+
+    # 执行失败, 直接返回
+    if resp.run_result.status != CommandRunStatus.Finished:
+        return resp 
+
+    # 执行成功，对stdout进行校验
+    try:
+        logger.debug(
+            f'start check with code ```\n{request.check_code[:100]}\n``` and files {list(request.files.keys())}...(memory_limit: {request.memory_limit_MB}MB)'
+        )
+
+        check_args = request.model_dump()
+        check_args['code'] = request.check_code
+        check_args['files']['input.txt']  = base64.b64encode(request.stdin.encode()).decode()
+        check_args['files']['output.txt'] = base64.b64encode(resp.run_result.stdout.encode()).decode()
+        result = await CODE_RUNNERS['cpp_check'](CodeRunArgs(**check_args))
+        resp.check_result = result
+
+    except Exception as e:
+        message = f'exception on checking code {request.check_code}: {e} {traceback.print_tb(e.__traceback__)}'
         logger.warning(message)
         resp.message = message
         resp.status = RunStatus.SandboxError
