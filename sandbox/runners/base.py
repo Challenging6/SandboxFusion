@@ -35,7 +35,10 @@ logger = structlog.stdlib.get_logger()
 config = RunConfig.get_instance_sync()
 
 
-def build_preexec_fn(memory_limit_MB: int = -1, set_uid: Optional[int] = None, cwd: Optional[str] = None):
+def build_preexec_fn(memory_limit_MB: int = -1,
+                     set_uid: Optional[int] = None,
+                     cwd: Optional[str] = None,
+                     cpu_limit_s: Optional[int] = None):
     preexec_steps = []
     if set_uid:
         if cwd is not None:
@@ -54,6 +57,19 @@ def build_preexec_fn(memory_limit_MB: int = -1, set_uid: Optional[int] = None, c
                 resource.setrlimit(resource.RLIMIT_STACK, (soft_memory_limit, hard_memory_limit_STACK))
 
         preexec_steps.insert(0, memory_limit_preexec)
+
+    if cpu_limit_s is not None and cpu_limit_s > 0:
+        def cpu_limit_preexec():
+            soft_cpu_limit = int(cpu_limit_s)
+            _, hard_cpu_limit = resource.getrlimit(resource.RLIMIT_CPU)
+            # Keep a 1-second hard-limit buffer when possible, matching local evaluator behavior.
+            if hard_cpu_limit in (-1, resource.RLIM_INFINITY) or hard_cpu_limit >= soft_cpu_limit + 1:
+                new_hard_limit = soft_cpu_limit + 1
+            else:
+                new_hard_limit = hard_cpu_limit
+            resource.setrlimit(resource.RLIMIT_CPU, (soft_cpu_limit, new_hard_limit))
+
+        preexec_steps.insert(0, cpu_limit_preexec)
 
     return (lambda: [step() for step in preexec_steps]) if preexec_steps else None
 

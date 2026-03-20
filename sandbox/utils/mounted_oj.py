@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import tempfile
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -16,6 +17,7 @@ from sandbox.utils.execution import get_tmp_dir
 
 logger = structlog.stdlib.get_logger()
 config = RunConfig.get_instance_sync()
+CPP_STD = 'c++20'
 
 VERDICT_AC = 'AC'
 VERDICT_WA = 'WA'
@@ -121,11 +123,19 @@ def _copy_problem_files(problem_dir: Path, work_dir: Path, relative_paths: List[
         dst.write_bytes(src.read_bytes())
 
 
-async def _compile_cpp(source_path: Path, output_path: Path, timeout: float, cwd: Path,
-                       memory_limit_mb: int = -1) -> CommandRunResult:
+async def _compile_cpp(source_path: Path,
+                       output_path: Path,
+                       timeout: float,
+                       cwd: Path,
+                       memory_limit_mb: int = -1,
+                       extra_flags: Optional[List[str]] = None) -> CommandRunResult:
     flags = await get_cpp_rt_flags()
+    compile_flags = [f"-std={CPP_STD}"]
+    if extra_flags:
+        compile_flags.extend(extra_flags)
+    compile_flags.extend(flags)
     command = (
-        f'g++ -std=c++17 {shlex.quote(source_path.name)} -o {shlex.quote(output_path.name)} {" ".join(flags)}'
+        f'g++ {" ".join(compile_flags)} {shlex.quote(source_path.name)} -o {shlex.quote(output_path.name)}'
     ).strip()
     return await run_command_bare(
         command,
@@ -136,18 +146,18 @@ async def _compile_cpp(source_path: Path, output_path: Path, timeout: float, cwd
 
 
 async def _run_binary(binary_path: Path, cwd: Path, stdin_text: Optional[str], timeout: float,
-                      memory_limit_mb: int = -1) -> CommandRunResult:
+                      memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
     return await run_command_bare(
         f'./{shlex.quote(binary_path.name)}',
         timeout=timeout,
         stdin=stdin_text,
         cwd=str(cwd),
-        preexec_fn=build_preexec_fn(memory_limit_mb),
+        preexec_fn=build_preexec_fn(memory_limit_mb, cpu_limit_s=cpu_limit_s),
     )
 
 
 async def _run_checker_binary(checker_path: Path, cwd: Path, argv: List[str], timeout: float,
-                              memory_limit_mb: int = -1) -> CommandRunResult:
+                              memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
     escaped_argv = ' '.join(shlex.quote(arg) for arg in argv)
     command = f'./{shlex.quote(checker_path.name)}'
     if escaped_argv:
@@ -156,7 +166,7 @@ async def _run_checker_binary(checker_path: Path, cwd: Path, argv: List[str], ti
         command,
         timeout=timeout,
         cwd=str(cwd),
-        preexec_fn=build_preexec_fn(memory_limit_mb),
+        preexec_fn=build_preexec_fn(memory_limit_mb, cpu_limit_s=cpu_limit_s),
     )
 
 
@@ -247,9 +257,10 @@ async def judge_cases_from_disk(
     normalized_case_ids = normalize_case_ids(case_ids, problem, case_map)
 
     effective_memory_limit = problem.memory_limit_mb if memory_limit_mb is None else memory_limit_mb
-    effective_run_timeout = run_timeout
-    if effective_run_timeout is None:
-        effective_run_timeout = max(problem.time_limit_ms * time_limit_multiplier / 1000.0, 0.001)
+    tl_s = max(problem.time_limit_ms * time_limit_multiplier / 1000.0, 0.001)
+    cpu_limit_s = max(1, math.ceil(tl_s))
+    effective_run_timeout = run_timeout if run_timeout is not None else max(tl_s * 2 + 2.0, 10.0)
+    checker_timeout = max(effective_run_timeout, 10.0)
 
     with tempfile.TemporaryDirectory(dir=get_tmp_dir(), ignore_cleanup_errors=True) as tmp_dir_name:
         work_dir = Path(tmp_dir_name)
@@ -258,7 +269,13 @@ async def judge_cases_from_disk(
         solution_src = work_dir / 'solution.cpp'
         solution_bin = work_dir / 'solution'
         solution_src.write_text(code, encoding='utf-8')
-        compile_result = await _compile_cpp(solution_src, solution_bin, compile_timeout, work_dir)
+        compile_result = await _compile_cpp(
+            solution_src,
+            solution_bin,
+            compile_timeout,
+            work_dir,
+            extra_flags=['-O2', '-DONLINE_JUDGE'],
+        )
         if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
             return problem, compile_result, None, _failed_case_results(normalized_case_ids, VERDICT_CE, case_map)
 
@@ -270,7 +287,13 @@ async def judge_cases_from_disk(
             checker_src = work_dir / problem.checker.source
             checker_bin = work_dir / 'checker'
             checker_argv = list(problem.checker.argv)
-            checker_compile_result = await _compile_cpp(checker_src, checker_bin, compile_timeout, work_dir)
+            checker_compile_result = await _compile_cpp(
+                checker_src,
+                checker_bin,
+                compile_timeout,
+                work_dir,
+                extra_flags=['-O2', f'-I{work_dir}'],
+            )
             if checker_compile_result.status != CommandRunStatus.Finished or checker_compile_result.return_code != 0:
                 return (
                     problem,
@@ -294,6 +317,7 @@ async def judge_cases_from_disk(
                 stdin_text=stdin_text,
                 timeout=effective_run_timeout,
                 memory_limit_mb=effective_memory_limit,
+                cpu_limit_s=cpu_limit_s,
             )
             run_verdict = _run_verdict(run_result)
             if run_verdict != VERDICT_AC:
@@ -320,8 +344,9 @@ async def judge_cases_from_disk(
                     checker_bin,
                     work_dir,
                     checker_argv,
-                    timeout=effective_run_timeout,
+                    timeout=checker_timeout,
                     memory_limit_mb=effective_memory_limit,
+                    cpu_limit_s=cpu_limit_s,
                 )
                 verdict = _checker_verdict(check_result)
             elif not _plain_compare(run_result.stdout or '', expected_output):

@@ -45,6 +45,8 @@ def get_python_rt_env(env_name: str):
 
 
 __cpp_rt_flags = None
+CPP_STD = 'c++20'
+CPP_OPT_FLAGS = ['-O2', '-DONLINE_JUDGE']
 
 
 async def get_cpp_rt_flags():
@@ -99,7 +101,8 @@ async def run_cpp(args: CodeRunArgs) -> CodeRunResult:
         with tempfile.NamedTemporaryFile(mode='w', dir=tmp_dir, suffix='.cpp', delete=False) as f:
             f.write(args.code)
 
-        return await run_commands(f'g++ -std=c++17 {f.name} -o test {" ".join(flags)}', './test', tmp_dir, {}, args)
+        compile_flags = " ".join(CPP_OPT_FLAGS + flags).strip()
+        return await run_commands(f'g++ -std={CPP_STD} {compile_flags} {f.name} -o test', './test', tmp_dir, {}, args)
 
 
 async def run_cpp_check(args: CodeRunArgs) -> CodeRunResult:
@@ -111,8 +114,8 @@ async def run_cpp_check(args: CodeRunArgs) -> CodeRunResult:
         argv = args.argv # 获取参数列表，默认为空
         escaped_argv = [shlex.quote(arg) for arg in argv] # 对参数进行转义以防止注入
         run_cmd = './test' + (' ' + ' '.join(escaped_argv) if escaped_argv else '')
-
-        return await run_commands(f'g++ -std=c++17 {f.name} -o test {" ".join(flags)}', run_cmd, tmp_dir, {}, args)
+        compile_flags = " ".join(CPP_OPT_FLAGS + flags).strip()
+        return await run_commands(f'g++ -std={CPP_STD} {compile_flags} {f.name} -o test', run_cmd, tmp_dir, {}, args)
 
 
 async def run_csharp(args: CodeRunArgs) -> CodeRunResult:

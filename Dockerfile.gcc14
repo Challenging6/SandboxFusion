@@ -1,0 +1,41 @@
+FROM vemlp-cn-beijing.cr.volces.com/preset-images/code-sandbox:server-20250609
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    software-properties-common \
+    ca-certificates \
+    gnupg \
+    wget && \
+    add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc-14 \
+    g++-14 \
+    cpp-14 \
+    build-essential \
+    git \
+    tmux \
+    zsh \
+    rclone \
+    htop \
+    net-tools \
+    iproute2 \
+    iperf3 \
+    traceroute \
+    openssh-server && \
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 140 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 140 && \
+    update-alternatives --install /usr/bin/cpp cpp /usr/bin/cpp-14 140 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CC=/usr/bin/gcc-14
+ENV CXX=/usr/bin/g++-14
+
+RUN git clone https://github.com/Challenging6/SandboxFusion.git /tmp/sandbox_new
+RUN cp -rf /tmp/sandbox_new/* /root/sandbox/ && \
+    cp -rf /tmp/sandbox_new/.* /root/sandbox/ 2>/dev/null || true
+
+RUN gcc --version && g++ --version
