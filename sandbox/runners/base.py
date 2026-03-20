@@ -35,6 +35,29 @@ logger = structlog.stdlib.get_logger()
 config = RunConfig.get_instance_sync()
 
 
+def build_preexec_fn(memory_limit_MB: int = -1, set_uid: Optional[int] = None, cwd: Optional[str] = None):
+    preexec_steps = []
+    if set_uid:
+        if cwd is not None:
+            set_permissions_recursively(cwd, 0o777)
+        preexec_steps.append(lambda: os.setuid(set_uid))
+
+    if memory_limit_MB > 0:
+        def memory_limit_preexec():
+            _, hard_memory_limit_AS = resource.getrlimit(resource.RLIMIT_AS)
+            _, hard_memory_limit_DATA = resource.getrlimit(resource.RLIMIT_DATA)
+            soft_memory_limit = memory_limit_MB * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (soft_memory_limit, hard_memory_limit_AS))
+            resource.setrlimit(resource.RLIMIT_DATA, (soft_memory_limit, hard_memory_limit_DATA))
+            if platform.uname().system != "Darwin":
+                _, hard_memory_limit_STACK = resource.getrlimit(resource.RLIMIT_STACK)
+                resource.setrlimit(resource.RLIMIT_STACK, (soft_memory_limit, hard_memory_limit_STACK))
+
+        preexec_steps.insert(0, memory_limit_preexec)
+
+    return (lambda: [step() for step in preexec_steps]) if preexec_steps else None
+
+
 async def run_command_bare(command: str | List[str],
                            timeout: float = 10,
                            stdin: Optional[str] = None,
@@ -119,25 +142,8 @@ async def run_commands(compile_command: Optional[str], run_command: str, cwd: st
     run_res = None
 
     if config.sandbox.isolation == 'none':
-        preexec_steps = []
-        if kwargs.get('set_uid'):
-            set_permissions_recursively(cwd, 0o777)
-            preexec_steps.append(lambda: os.setuid(kwargs.get('set_uid')))
-        
-        # Apply memory limit using resource module
-        if args.memory_limit_MB > 0:
-            def memory_limit_preexec():
-                _, hard_memory_limit_AS = resource.getrlimit(resource.RLIMIT_AS)
-                _, hard_memory_limit_DATA = resource.getrlimit(resource.RLIMIT_DATA)
-                soft_memory_limit = args.memory_limit_MB * 1024 * 1024
-                resource.setrlimit(resource.RLIMIT_AS, (soft_memory_limit, hard_memory_limit_AS))
-                resource.setrlimit(resource.RLIMIT_DATA, (soft_memory_limit, hard_memory_limit_DATA))
-                if platform.uname().system != "Darwin":
-                    _, hard_memory_limit_STACK = resource.getrlimit(resource.RLIMIT_STACK)
-                    resource.setrlimit(resource.RLIMIT_STACK, (soft_memory_limit, hard_memory_limit_STACK))
-            preexec_steps.insert(0, memory_limit_preexec)
-        preexec_fn = lambda: [step() for step in preexec_steps] if preexec_steps else None
-        
+        preexec_fn = build_preexec_fn(args.memory_limit_MB, kwargs.get('set_uid'), cwd)
+
         if compile_command is not None:
             compile_res = await run_command_bare(compile_command,
                                                  args.compile_timeout,

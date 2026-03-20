@@ -38,16 +38,15 @@ async def lifespan(app: FastAPI):
     await datalake.disconnect()
     await sqlite.disconnect()
 
-
 app = FastAPI(lifespan=lifespan)
-app.mount('/playground',
-          StaticFiles(directory=os.path.abspath(os.path.join(__file__, '../../pages')), html=True),
-          name='playground')
 
-app = FastAPI(lifespan=lifespan)
-app.mount('/SandboxFusion',
-          StaticFiles(directory=os.path.abspath(os.path.join(__file__, '../../../docs/build')), html=True),
-          name='doc-site')
+playground_dir = os.path.abspath(os.path.join(__file__, '../../pages'))
+if os.path.isdir(playground_dir):
+    app.mount('/playground', StaticFiles(directory=playground_dir, html=True), name='playground')
+
+docs_dir = os.path.abspath(os.path.join(__file__, '../../../docs/build'))
+if os.path.isdir(docs_dir):
+    app.mount('/SandboxFusion', StaticFiles(directory=docs_dir, html=True), name='doc-site')
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -67,6 +67,7 @@ class RunConfig(BaseModel):
         max_runner_concurrency: int = 0
         cpu_runner_url: Optional[str] = None
         gpu_runner_url: Optional[str] = None
+        oj_data_root: Optional[str] = None
         default_dataset_table: str = 'code_eval_${dataset_id}'
         registry: List[RegistryItem] = []
 

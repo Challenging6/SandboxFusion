@@ -7,6 +7,7 @@ dataset:
       sources:
         - type: local
           path: sandbox/tests/datasets/samples
+  oj_data_root:
   max_runner_concurrency: 3
   default_dataset_table: code_eval_${dataset_id}
   registry:

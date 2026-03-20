@@ -16,10 +16,10 @@ import os
 from tabnanny import check
 import traceback
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 import base64
 import structlog
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from sandbox.runners import (
@@ -32,6 +32,13 @@ from sandbox.runners import (
     Language,
     RunJupyterRequest,
     run_jupyter,
+)
+from sandbox.utils.mounted_oj import (
+    MountedOJCaseResult,
+    VERDICT_AC,
+    VERDICT_ERROR,
+    judge_cases_from_disk,
+    resolve_data_root,
 )
 
 sandbox_router = APIRouter()
@@ -84,6 +91,35 @@ class RunJupyterResponse(BaseModel):
     cells: List[CellRunResult] = []
     executor_pod_name: Optional[str] = None
     files: Dict[str, str] = {}
+
+
+class RunMountedOJRequest(BaseModel):
+    problem_id: str = Field(..., description='problem directory name under the mounted OJ data root')
+    case_ids: List[str | int] | str | int = Field(
+        ...,
+        description='one or more case ids defined in problem.json, or "all" to run all cases',
+    )
+    code: str = Field(..., description='the code to judge')
+    language: Literal['cpp'] = Field('cpp', description='currently only cpp is supported by the mounted OJ endpoint')
+    data_dir: Optional[str] = Field(None, description='optional override for the mounted OJ data root')
+    compile_timeout: float = Field(30, description='compile timeout in seconds')
+    run_timeout: Optional[float] = Field(None, description='optional per-case run timeout in seconds')
+    time_limit_multiplier: float = Field(
+        1.0, description='used with problem.json time_limit_ms when run_timeout is not explicitly provided')
+    memory_limit_MB: Optional[int] = Field(None, description='optional override for problem.json memory_limit_mb')
+
+
+class RunMountedOJResponse(BaseModel):
+    status: RunStatus
+    message: str
+    problem_id: str
+    data_dir: str
+    compile_result: Optional[CommandRunResult] = None
+    checker_compile_result: Optional[CommandRunResult] = None
+    cases: List[MountedOJCaseResult] = []
+    total_score: float = 0.0
+    max_score: float = 0.0
+    executor_pod_name: Optional[str] = None
 
 
 def parse_run_status(result: CodeRunResult) -> Tuple[RunStatus, str]:
@@ -193,6 +229,72 @@ async def run_check_code(request: RunCodeRequest):
 
     except Exception as e:
         message = f'exception on checking code {request.check_code}: {e} {traceback.print_tb(e.__traceback__)}'
+        logger.warning(message)
+        resp.message = message
+        resp.status = RunStatus.SandboxError
+
+    return resp
+
+
+@sandbox_router.post("/run_oj_cases", response_model=RunMountedOJResponse, tags=['sandbox'])
+async def run_oj_cases(request: RunMountedOJRequest):
+    if request.case_ids in (None, [], ''):
+        raise HTTPException(status_code=400, detail='case_ids must not be empty')
+    if request.time_limit_multiplier <= 0:
+        raise HTTPException(status_code=400, detail='time_limit_multiplier must be positive')
+    if isinstance(request.case_ids, (str, int)):
+        request_case_ids = [str(request.case_ids)]
+    else:
+        request_case_ids = [str(case_id) for case_id in request.case_ids]
+
+    resp = RunMountedOJResponse(
+        status=RunStatus.Success,
+        message='',
+        problem_id=request.problem_id,
+        data_dir='',
+        executor_pod_name=os.environ.get('MY_POD_NAME'),
+    )
+    try:
+        data_root = resolve_data_root(request.data_dir)
+        resp.data_dir = str(data_root)
+        logger.debug(
+            'start processing mounted OJ request',
+            problem_id=request.problem_id,
+            case_ids=request_case_ids,
+            data_dir=resp.data_dir,
+        )
+        _, compile_result, checker_compile_result, case_results = await judge_cases_from_disk(
+            data_root=data_root,
+            problem_id=request.problem_id,
+            case_ids=request.case_ids,
+            code=request.code,
+            compile_timeout=request.compile_timeout,
+            run_timeout=request.run_timeout,
+            time_limit_multiplier=request.time_limit_multiplier,
+            memory_limit_mb=request.memory_limit_MB,
+        )
+        resp.compile_result = compile_result
+        resp.checker_compile_result = checker_compile_result
+        resp.cases = case_results
+        resp.total_score = float(sum(case.score for case in case_results))
+        resp.max_score = float(sum(case.max_score for case in case_results))
+
+        if any(
+            result is not None and result.status == CommandRunStatus.Error
+            for result in (compile_result, checker_compile_result)
+        ) or any(case.verdict == VERDICT_ERROR for case in case_results):
+            resp.status = RunStatus.SandboxError
+            resp.message = 'sandbox error while compiling or running mounted OJ cases'
+        elif all(case.verdict == VERDICT_AC for case in case_results):
+            resp.status = RunStatus.Success
+        else:
+            resp.status = RunStatus.Failed
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        message = f'exception on mounted OJ request {request.problem_id}: {e} {traceback.print_tb(e.__traceback__)}'
         logger.warning(message)
         resp.message = message
         resp.status = RunStatus.SandboxError

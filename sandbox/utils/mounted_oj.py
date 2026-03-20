@@ -1,0 +1,343 @@
+import json
+import os
+import shlex
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import structlog
+from pydantic import BaseModel, Field
+
+from sandbox.configs.run_config import RunConfig
+from sandbox.runners.base import build_preexec_fn, run_command_bare
+from sandbox.runners.major import get_cpp_rt_flags
+from sandbox.runners.types import CommandRunResult, CommandRunStatus
+from sandbox.utils.execution import get_tmp_dir
+
+logger = structlog.stdlib.get_logger()
+config = RunConfig.get_instance_sync()
+
+VERDICT_AC = 'AC'
+VERDICT_WA = 'WA'
+VERDICT_TLE = 'TLE'
+VERDICT_RE = 'RE'
+VERDICT_CE = 'CE'
+VERDICT_CHECKER_CE = 'CHECKER_CE'
+VERDICT_ERROR = 'ERROR'
+
+
+class MountedOJCheckerSpec(BaseModel):
+    source: str = 'checker.cpp'
+    files: List[str] = Field(default_factory=list)
+    argv: List[str] = Field(default_factory=lambda: ['input.txt', 'output.txt', 'answer.txt'])
+
+
+class MountedOJCaseSpec(BaseModel):
+    id: str | int
+    input: str
+    answer: str
+    score: float = 1.0
+
+
+class MountedOJProblemSpec(BaseModel):
+    problem_id: Optional[str] = None
+    time_limit_ms: int = 1000
+    memory_limit_mb: int = -1
+    shared_files: List[str] = Field(default_factory=list)
+    checker: Optional[MountedOJCheckerSpec] = None
+    test_cases: List[MountedOJCaseSpec]
+
+
+class MountedOJCaseResult(BaseModel):
+    case_id: str
+    passed: bool
+    verdict: str
+    score: float = 0.0
+    max_score: float = 1.0
+    input_path: Optional[str] = None
+    answer_path: Optional[str] = None
+    run_result: Optional[CommandRunResult] = None
+    check_result: Optional[CommandRunResult] = None
+
+
+def _validate_identifier(raw_value: str | int, field_name: str) -> str:
+    value = str(raw_value)
+    if not value or value in {'.', '..'}:
+        raise ValueError(f'invalid {field_name}: {raw_value!r}')
+    if '/' in value or '\\' in value:
+        raise ValueError(f'{field_name} must not contain path separators: {raw_value!r}')
+    return value
+
+
+def _resolve_under(base_dir: Path, relative_path: str) -> Path:
+    candidate = (base_dir / relative_path).resolve()
+    base_resolved = base_dir.resolve()
+    if candidate != base_resolved and base_resolved not in candidate.parents:
+        raise ValueError(f'path escapes base directory: {relative_path!r}')
+    return candidate
+
+
+def resolve_data_root(data_dir: Optional[str]) -> Path:
+    root = data_dir or os.getenv('OJ_DATA_ROOT') or config.dataset.oj_data_root
+    if not root:
+        raise ValueError('OJ data root is not configured. Set request.data_dir, OJ_DATA_ROOT, or config.dataset.oj_data_root.')
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise ValueError(f'OJ data root does not exist or is not a directory: {root_path}')
+    return root_path
+
+
+def load_problem_spec(data_root: Path, problem_id: str) -> Tuple[Path, MountedOJProblemSpec, Dict[str, MountedOJCaseSpec]]:
+    safe_problem_id = _validate_identifier(problem_id, 'problem_id')
+    problem_dir = _resolve_under(data_root, safe_problem_id)
+    manifest_path = problem_dir / 'problem.json'
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f'problem manifest not found: {manifest_path}')
+
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+        problem = MountedOJProblemSpec(**json.load(f))
+
+    if problem.problem_id is not None and str(problem.problem_id) != safe_problem_id:
+        raise ValueError(
+            f'problem.json problem_id mismatch: expected {safe_problem_id!r}, got {problem.problem_id!r}')
+
+    case_map = {}
+    for case in problem.test_cases:
+        case_id = _validate_identifier(case.id, 'case_id')
+        if case_id in case_map:
+            raise ValueError(f'duplicate case id in manifest: {case_id!r}')
+        case_map[case_id] = case
+
+    return problem_dir, problem, case_map
+
+
+def _copy_problem_files(problem_dir: Path, work_dir: Path, relative_paths: List[str]) -> None:
+    for rel_path in relative_paths:
+        src = _resolve_under(problem_dir, rel_path)
+        if not src.is_file():
+            raise FileNotFoundError(f'problem asset not found: {src}')
+        dst = work_dir / rel_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes())
+
+
+async def _compile_cpp(source_path: Path, output_path: Path, timeout: float, cwd: Path,
+                       memory_limit_mb: int = -1) -> CommandRunResult:
+    flags = await get_cpp_rt_flags()
+    command = (
+        f'g++ -std=c++17 {shlex.quote(source_path.name)} -o {shlex.quote(output_path.name)} {" ".join(flags)}'
+    ).strip()
+    return await run_command_bare(
+        command,
+        timeout=timeout,
+        cwd=str(cwd),
+        preexec_fn=build_preexec_fn(memory_limit_mb),
+    )
+
+
+async def _run_binary(binary_path: Path, cwd: Path, stdin_text: Optional[str], timeout: float,
+                      memory_limit_mb: int = -1) -> CommandRunResult:
+    return await run_command_bare(
+        f'./{shlex.quote(binary_path.name)}',
+        timeout=timeout,
+        stdin=stdin_text,
+        cwd=str(cwd),
+        preexec_fn=build_preexec_fn(memory_limit_mb),
+    )
+
+
+async def _run_checker_binary(checker_path: Path, cwd: Path, argv: List[str], timeout: float,
+                              memory_limit_mb: int = -1) -> CommandRunResult:
+    escaped_argv = ' '.join(shlex.quote(arg) for arg in argv)
+    command = f'./{shlex.quote(checker_path.name)}'
+    if escaped_argv:
+        command = f'{command} {escaped_argv}'
+    return await run_command_bare(
+        command,
+        timeout=timeout,
+        cwd=str(cwd),
+        preexec_fn=build_preexec_fn(memory_limit_mb),
+    )
+
+
+def _run_verdict(run_result: CommandRunResult) -> str:
+    if run_result.status == CommandRunStatus.TimeLimitExceeded:
+        return VERDICT_TLE
+    if run_result.status == CommandRunStatus.Error:
+        return VERDICT_ERROR
+    if run_result.return_code != 0:
+        return VERDICT_RE
+    return VERDICT_AC
+
+
+def _checker_verdict(check_result: CommandRunResult) -> str:
+    if check_result.status == CommandRunStatus.TimeLimitExceeded:
+        return VERDICT_CHECKER_CE
+    if check_result.status == CommandRunStatus.Error:
+        return VERDICT_ERROR
+    if check_result.return_code == 0:
+        return VERDICT_AC
+    if check_result.return_code in (1, 2, 7):
+        return VERDICT_WA
+    if check_result.return_code == 3:
+        message = (check_result.stderr or '').lower()
+        if 'better' in message or 'optimal' in message:
+            return VERDICT_AC
+        return VERDICT_CHECKER_CE
+    return VERDICT_CHECKER_CE
+
+
+def _plain_compare(actual: str, expected: str) -> bool:
+    return actual.split() == expected.split()
+
+
+def _is_all_case_selector(raw_value: str | int) -> bool:
+    return isinstance(raw_value, str) and raw_value.lower() == 'all'
+
+
+def normalize_case_ids(case_ids: List[str | int] | str | int,
+                       problem: MountedOJProblemSpec,
+                       case_map: Dict[str, MountedOJCaseSpec]) -> List[str]:
+    if isinstance(case_ids, (str, int)):
+        raw_case_ids = [case_ids]
+    else:
+        raw_case_ids = list(case_ids)
+
+    if not raw_case_ids:
+        raise ValueError('case_ids must not be empty')
+
+    if len(raw_case_ids) == 1 and _is_all_case_selector(raw_case_ids[0]):
+        return [str(case.id) for case in problem.test_cases]
+
+    if any(_is_all_case_selector(case_id) for case_id in raw_case_ids):
+        raise ValueError('case_ids="all" must be used alone')
+
+    normalized_case_ids = [_validate_identifier(case_id, 'case_id') for case_id in raw_case_ids]
+    for case_id in normalized_case_ids:
+        if case_id not in case_map:
+            raise FileNotFoundError(f'case id {case_id!r} not found in problem')
+    return normalized_case_ids
+
+
+def _failed_case_results(case_ids: List[str], verdict: str,
+                         case_map: Dict[str, MountedOJCaseSpec]) -> List[MountedOJCaseResult]:
+    return [
+        MountedOJCaseResult(
+            case_id=case_id,
+            passed=False,
+            verdict=verdict,
+            score=0.0,
+            max_score=float(case_map[case_id].score),
+        )
+        for case_id in case_ids
+    ]
+
+
+async def judge_cases_from_disk(
+    data_root: Path,
+    problem_id: str,
+    case_ids: List[str | int] | str | int,
+    code: str,
+    compile_timeout: float,
+    run_timeout: Optional[float] = None,
+    time_limit_multiplier: float = 1.0,
+    memory_limit_mb: Optional[int] = None,
+) -> Tuple[MountedOJProblemSpec, Optional[CommandRunResult], Optional[CommandRunResult], List[MountedOJCaseResult]]:
+    problem_dir, problem, case_map = load_problem_spec(data_root, problem_id)
+    normalized_case_ids = normalize_case_ids(case_ids, problem, case_map)
+
+    effective_memory_limit = problem.memory_limit_mb if memory_limit_mb is None else memory_limit_mb
+    effective_run_timeout = run_timeout
+    if effective_run_timeout is None:
+        effective_run_timeout = max(problem.time_limit_ms * time_limit_multiplier / 1000.0, 0.001)
+
+    with tempfile.TemporaryDirectory(dir=get_tmp_dir(), ignore_cleanup_errors=True) as tmp_dir_name:
+        work_dir = Path(tmp_dir_name)
+        _copy_problem_files(problem_dir, work_dir, problem.shared_files)
+
+        solution_src = work_dir / 'solution.cpp'
+        solution_bin = work_dir / 'solution'
+        solution_src.write_text(code, encoding='utf-8')
+        compile_result = await _compile_cpp(solution_src, solution_bin, compile_timeout, work_dir)
+        if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
+            return problem, compile_result, None, _failed_case_results(normalized_case_ids, VERDICT_CE, case_map)
+
+        checker_compile_result = None
+        checker_bin = None
+        checker_argv = None
+        if problem.checker is not None:
+            _copy_problem_files(problem_dir, work_dir, [problem.checker.source] + problem.checker.files)
+            checker_src = work_dir / problem.checker.source
+            checker_bin = work_dir / 'checker'
+            checker_argv = list(problem.checker.argv)
+            checker_compile_result = await _compile_cpp(checker_src, checker_bin, compile_timeout, work_dir)
+            if checker_compile_result.status != CommandRunStatus.Finished or checker_compile_result.return_code != 0:
+                return (
+                    problem,
+                    compile_result,
+                    checker_compile_result,
+                    _failed_case_results(normalized_case_ids, VERDICT_CHECKER_CE, case_map),
+                )
+
+        case_results: List[MountedOJCaseResult] = []
+        for case_id in normalized_case_ids:
+            case = case_map[case_id]
+            case_max_score = float(case.score)
+            input_path = _resolve_under(problem_dir, case.input)
+            answer_path = _resolve_under(problem_dir, case.answer)
+            stdin_text = input_path.read_text(encoding='utf-8')
+            expected_output = answer_path.read_text(encoding='utf-8')
+
+            run_result = await _run_binary(
+                solution_bin,
+                work_dir,
+                stdin_text=stdin_text,
+                timeout=effective_run_timeout,
+                memory_limit_mb=effective_memory_limit,
+            )
+            run_verdict = _run_verdict(run_result)
+            if run_verdict != VERDICT_AC:
+                case_results.append(
+                    MountedOJCaseResult(
+                        case_id=case_id,
+                        passed=False,
+                        verdict=run_verdict,
+                        score=0.0,
+                        max_score=case_max_score,
+                        input_path=case.input,
+                        answer_path=case.answer,
+                        run_result=run_result,
+                    ))
+                continue
+
+            check_result = None
+            verdict = VERDICT_AC
+            if checker_bin is not None and checker_argv is not None:
+                (work_dir / 'input.txt').write_text(stdin_text, encoding='utf-8')
+                (work_dir / 'output.txt').write_text(run_result.stdout or '', encoding='utf-8')
+                (work_dir / 'answer.txt').write_text(expected_output, encoding='utf-8')
+                check_result = await _run_checker_binary(
+                    checker_bin,
+                    work_dir,
+                    checker_argv,
+                    timeout=effective_run_timeout,
+                    memory_limit_mb=effective_memory_limit,
+                )
+                verdict = _checker_verdict(check_result)
+            elif not _plain_compare(run_result.stdout or '', expected_output):
+                verdict = VERDICT_WA
+
+            case_results.append(
+                MountedOJCaseResult(
+                    case_id=case_id,
+                    passed=verdict == VERDICT_AC,
+                    verdict=verdict,
+                    score=case_max_score if verdict == VERDICT_AC else 0.0,
+                    max_score=case_max_score,
+                    input_path=case.input,
+                    answer_path=case.answer,
+                    run_result=run_result,
+                    check_result=check_result,
+                ))
+
+        return problem, compile_result, checker_compile_result, case_results
