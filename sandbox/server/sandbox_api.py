@@ -107,6 +107,10 @@ class RunMountedOJRequest(BaseModel):
     time_limit_multiplier: float = Field(
         1.0, description='used with problem.json time_limit_ms when run_timeout is not explicitly provided')
     memory_limit_MB: Optional[int] = Field(None, description='optional override for problem.json memory_limit_mb')
+    include_details: bool = Field(
+        False,
+        description='when true, include per-case run_result/check_result details in the response',
+    )
 
 
 class RunMountedOJResponse(BaseModel):
@@ -120,6 +124,13 @@ class RunMountedOJResponse(BaseModel):
     total_score: float = 0.0
     max_score: float = 0.0
     executor_pod_name: Optional[str] = None
+
+
+def _strip_case_details(case_results: List[MountedOJCaseResult]) -> List[MountedOJCaseResult]:
+    return [
+        case.model_copy(update={'run_result': None, 'check_result': None})
+        for case in case_results
+    ]
 
 
 def parse_run_status(result: CodeRunResult) -> Tuple[RunStatus, str]:
@@ -275,7 +286,7 @@ async def run_oj_cases(request: RunMountedOJRequest):
         )
         resp.compile_result = compile_result
         resp.checker_compile_result = checker_compile_result
-        resp.cases = case_results
+        resp.cases = case_results if request.include_details else _strip_case_details(case_results)
         resp.total_score = float(sum(case.score for case in case_results))
         resp.max_score = float(sum(case.max_score for case in case_results))
 
