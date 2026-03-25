@@ -22,6 +22,7 @@ import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from sandbox.configs.run_config import RunConfig
 from sandbox.runners import (
     CODE_RUNNERS,
     CellRunResult,
@@ -40,9 +41,14 @@ from sandbox.utils.mounted_oj import (
     judge_cases_from_disk,
     resolve_data_root,
 )
+from sandbox.utils.execution import max_concurrency
 
 sandbox_router = APIRouter()
 logger = structlog.stdlib.get_logger()
+config = RunConfig.get_instance_sync()
+DEFAULT_MOUNTED_OJ_MAX_CONCURRENCY = max(1, min(config.sandbox.max_concurrency, 8))
+MOUNTED_OJ_MAX_CONCURRENCY = int(
+    os.getenv('SANDBOX_MOUNTED_OJ_MAX_CONCURRENCY', DEFAULT_MOUNTED_OJ_MAX_CONCURRENCY))
 
 
 class RunCodeRequest(BaseModel):
@@ -248,6 +254,7 @@ async def run_check_code(request: RunCodeRequest):
 
 
 @sandbox_router.post("/run_oj_cases", response_model=RunMountedOJResponse, tags=['sandbox'])
+@max_concurrency(MOUNTED_OJ_MAX_CONCURRENCY)
 async def run_oj_cases(request: RunMountedOJRequest):
     if request.case_ids in (None, [], ''):
         raise HTTPException(status_code=400, detail='case_ids must not be empty')

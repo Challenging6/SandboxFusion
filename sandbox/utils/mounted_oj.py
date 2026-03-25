@@ -123,6 +123,28 @@ def _copy_problem_files(problem_dir: Path, work_dir: Path, relative_paths: List[
         dst.write_bytes(src.read_bytes())
 
 
+def _prepare_case_dir(case_dir: Path, input_path: Path, answer_path: Path) -> Tuple[Path, Path, Path]:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    linked_input_path = case_dir / 'input.txt'
+    linked_answer_path = case_dir / 'answer.txt'
+    output_path = case_dir / 'output.txt'
+
+    for path in (linked_input_path, linked_answer_path, output_path):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+
+    try:
+        os.link(input_path, linked_input_path)
+    except OSError:
+        linked_input_path.symlink_to(input_path)
+
+    try:
+        os.link(answer_path, linked_answer_path)
+    except OSError:
+        linked_answer_path.symlink_to(answer_path)
+    return linked_input_path, linked_answer_path, output_path
+
+
 async def _compile_cpp(source_path: Path,
                        output_path: Path,
                        timeout: float,
@@ -145,12 +167,17 @@ async def _compile_cpp(source_path: Path,
     )
 
 
-async def _run_binary(binary_path: Path, cwd: Path, stdin_text: Optional[str], timeout: float,
+async def _run_binary(binary_path: Path,
+                      cwd: Path,
+                      stdin_path: Path,
+                      output_path: Path,
+                      timeout: float,
                       memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
     return await run_command_bare(
-        f'./{shlex.quote(binary_path.name)}',
+        shlex.quote(str(binary_path)),
         timeout=timeout,
-        stdin=stdin_text,
+        stdin_path=str(stdin_path),
+        stdout_path=str(output_path),
         cwd=str(cwd),
         preexec_fn=build_preexec_fn(memory_limit_mb, cpu_limit_s=cpu_limit_s),
     )
@@ -159,7 +186,7 @@ async def _run_binary(binary_path: Path, cwd: Path, stdin_text: Optional[str], t
 async def _run_checker_binary(checker_path: Path, cwd: Path, argv: List[str], timeout: float,
                               memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
     escaped_argv = ' '.join(shlex.quote(arg) for arg in argv)
-    command = f'./{shlex.quote(checker_path.name)}'
+    command = shlex.quote(str(checker_path))
     if escaped_argv:
         command = f'{command} {escaped_argv}'
     return await run_command_bare(
@@ -199,6 +226,54 @@ def _checker_verdict(check_result: CommandRunResult) -> str:
 
 def _plain_compare(actual: str, expected: str) -> bool:
     return actual.split() == expected.split()
+
+
+def _iter_tokens(path: Path, chunk_size: int = 64 * 1024):
+    pending = ''
+    with open(path, 'r', encoding='utf-8') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            data = pending + chunk
+            if data and not data[-1].isspace():
+                split_at = len(data)
+                while split_at > 0 and not data[split_at - 1].isspace():
+                    split_at -= 1
+                if split_at == 0:
+                    pending = data
+                    continue
+                emit = data[:split_at]
+                pending = data[split_at:]
+            else:
+                emit = data
+                pending = ''
+            for token in emit.split():
+                yield token
+    if pending:
+        for token in pending.split():
+            yield token
+
+
+def _plain_compare_files(actual_path: Path, expected_path: Path) -> bool:
+    actual_tokens = _iter_tokens(actual_path)
+    expected_tokens = _iter_tokens(expected_path)
+    while True:
+        actual = next(actual_tokens, None)
+        expected = next(expected_tokens, None)
+        if actual != expected:
+            return False
+        if actual is None:
+            return True
+
+
+def _resolve_checker_argv(argv: List[str], input_path: Path, output_path: Path, answer_path: Path) -> List[str]:
+    replacements = {
+        'input.txt': str(input_path),
+        'output.txt': str(output_path),
+        'answer.txt': str(answer_path),
+    }
+    return [replacements.get(arg, arg) for arg in argv]
 
 
 def _is_all_case_selector(raw_value: str | int) -> bool:
@@ -308,13 +383,14 @@ async def judge_cases_from_disk(
             case_max_score = float(case.score)
             input_path = _resolve_under(problem_dir, case.input)
             answer_path = _resolve_under(problem_dir, case.answer)
-            stdin_text = input_path.read_text(encoding='utf-8')
-            expected_output = answer_path.read_text(encoding='utf-8')
+            case_dir = work_dir / f'case_{case_id}'
+            checker_input_path, checker_answer_path, output_path = _prepare_case_dir(case_dir, input_path, answer_path)
 
             run_result = await _run_binary(
                 solution_bin,
-                work_dir,
-                stdin_text=stdin_text,
+                case_dir,
+                stdin_path=input_path,
+                output_path=output_path,
                 timeout=effective_run_timeout,
                 memory_limit_mb=effective_memory_limit,
                 cpu_limit_s=cpu_limit_s,
@@ -337,19 +413,22 @@ async def judge_cases_from_disk(
             check_result = None
             verdict = VERDICT_AC
             if checker_bin is not None and checker_argv is not None:
-                (work_dir / 'input.txt').write_text(stdin_text, encoding='utf-8')
-                (work_dir / 'output.txt').write_text(run_result.stdout or '', encoding='utf-8')
-                (work_dir / 'answer.txt').write_text(expected_output, encoding='utf-8')
+                resolved_checker_argv = _resolve_checker_argv(
+                    checker_argv,
+                    checker_input_path,
+                    output_path,
+                    checker_answer_path,
+                )
                 check_result = await _run_checker_binary(
                     checker_bin,
-                    work_dir,
-                    checker_argv,
+                    case_dir,
+                    resolved_checker_argv,
                     timeout=checker_timeout,
                     memory_limit_mb=effective_memory_limit,
                     cpu_limit_s=cpu_limit_s,
                 )
                 verdict = _checker_verdict(check_result)
-            elif not _plain_compare(run_result.stdout or '', expected_output):
+            elif not _plain_compare_files(output_path, answer_path):
                 verdict = VERDICT_WA
 
             case_results.append(
