@@ -17,7 +17,7 @@ from sandbox.utils.execution import get_tmp_dir
 
 logger = structlog.stdlib.get_logger()
 config = RunConfig.get_instance_sync()
-CPP_STD = 'c++20'
+CPP_STD = 'c++17'
 
 VERDICT_AC = 'AC'
 VERDICT_WA = 'WA'
@@ -425,7 +425,8 @@ async def judge_cases_from_disk(
                     resolved_checker_argv,
                     timeout=checker_timeout,
                     memory_limit_mb=effective_memory_limit,
-                    cpu_limit_s=cpu_limit_s,
+                    # Checkers are trusted problem assets; avoid killing them with contestant CPU limits.
+                    cpu_limit_s=None,
                 )
                 verdict = _checker_verdict(check_result)
             elif not _plain_compare_files(output_path, answer_path):

@@ -45,7 +45,7 @@ def get_python_rt_env(env_name: str):
 
 
 __cpp_rt_flags = None
-CPP_STD = 'c++20'
+CPP_STD = 'c++17'
 CPP_OPT_FLAGS = ['-O2', '-DONLINE_JUDGE']
 
 
