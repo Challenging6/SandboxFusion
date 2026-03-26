@@ -113,6 +113,10 @@ class RunMountedOJRequest(BaseModel):
     time_limit_multiplier: float = Field(
         1.0, description='used with problem.json time_limit_ms when run_timeout is not explicitly provided')
     memory_limit_MB: Optional[int] = Field(None, description='optional override for problem.json memory_limit_mb')
+    enable_msvc_i64_compat: bool = Field(
+        False,
+        description='when true, rewrite legacy MSVC-style %I64* stdio format specifiers in submitted cpp code',
+    )
     include_details: bool = Field(
         False,
         description='when true, include per-case run_result/check_result details in the response',
@@ -280,6 +284,7 @@ async def run_oj_cases(request: RunMountedOJRequest):
             problem_id=request.problem_id,
             case_ids=request_case_ids,
             data_dir=resp.data_dir,
+            enable_msvc_i64_compat=request.enable_msvc_i64_compat,
         )
         _, compile_result, checker_compile_result, case_results = await judge_cases_from_disk(
             data_root=data_root,
@@ -290,6 +295,7 @@ async def run_oj_cases(request: RunMountedOJRequest):
             run_timeout=request.run_timeout,
             time_limit_multiplier=request.time_limit_multiplier,
             memory_limit_mb=request.memory_limit_MB,
+            enable_msvc_i64_compat=request.enable_msvc_i64_compat,
         )
         resp.compile_result = compile_result
         resp.checker_compile_result = checker_compile_result

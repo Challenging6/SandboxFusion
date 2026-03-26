@@ -3,6 +3,7 @@ import os
 import shlex
 import tempfile
 import math
+import signal
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -18,6 +19,14 @@ from sandbox.utils.execution import get_tmp_dir
 logger = structlog.stdlib.get_logger()
 config = RunConfig.get_instance_sync()
 CPP_STD = 'c++17'
+MSVC_I64_COMPAT_REPLACEMENTS = (
+    ('%I64d', '%lld'),
+    ('%I64i', '%lli'),
+    ('%I64u', '%llu'),
+    ('%I64x', '%llx'),
+    ('%I64X', '%llX'),
+    ('%I64o', '%llo'),
+)
 
 VERDICT_AC = 'AC'
 VERDICT_WA = 'WA'
@@ -26,6 +35,7 @@ VERDICT_RE = 'RE'
 VERDICT_CE = 'CE'
 VERDICT_CHECKER_CE = 'CHECKER_CE'
 VERDICT_ERROR = 'ERROR'
+CPU_LIMIT_SIGNAL_RETURN_CODES = {-signal.SIGXCPU}
 
 
 class MountedOJCheckerSpec(BaseModel):
@@ -202,6 +212,8 @@ def _run_verdict(run_result: CommandRunResult) -> str:
         return VERDICT_TLE
     if run_result.status == CommandRunStatus.Error:
         return VERDICT_ERROR
+    if run_result.return_code in CPU_LIMIT_SIGNAL_RETURN_CODES:
+        return VERDICT_TLE
     if run_result.return_code != 0:
         return VERDICT_RE
     return VERDICT_AC
@@ -226,6 +238,16 @@ def _checker_verdict(check_result: CommandRunResult) -> str:
 
 def _plain_compare(actual: str, expected: str) -> bool:
     return actual.split() == expected.split()
+
+
+def _rewrite_cpp_legacy_stdio_formats(code: str, enable_compat: bool) -> str:
+    if not enable_compat:
+        return code
+
+    rewritten = code
+    for old, new in MSVC_I64_COMPAT_REPLACEMENTS:
+        rewritten = rewritten.replace(old, new)
+    return rewritten
 
 
 def _iter_tokens(path: Path, chunk_size: int = 64 * 1024):
@@ -327,6 +349,7 @@ async def judge_cases_from_disk(
     run_timeout: Optional[float] = None,
     time_limit_multiplier: float = 1.0,
     memory_limit_mb: Optional[int] = None,
+    enable_msvc_i64_compat: bool = False,
 ) -> Tuple[MountedOJProblemSpec, Optional[CommandRunResult], Optional[CommandRunResult], List[MountedOJCaseResult]]:
     problem_dir, problem, case_map = load_problem_spec(data_root, problem_id)
     normalized_case_ids = normalize_case_ids(case_ids, problem, case_map)
@@ -343,7 +366,10 @@ async def judge_cases_from_disk(
 
         solution_src = work_dir / 'solution.cpp'
         solution_bin = work_dir / 'solution'
-        solution_src.write_text(code, encoding='utf-8')
+        solution_src.write_text(
+            _rewrite_cpp_legacy_stdio_formats(code, enable_msvc_i64_compat),
+            encoding='utf-8',
+        )
         compile_result = await _compile_cpp(
             solution_src,
             solution_bin,
