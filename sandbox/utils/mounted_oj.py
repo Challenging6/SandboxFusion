@@ -243,22 +243,36 @@ def _build_java_runtime_command(classpath_entries: List[str], memory_limit_mb: i
     effective_memory_mb = memory_limit_mb if memory_limit_mb and memory_limit_mb > 0 else 256
 
     # Keep JVM startup conservative so Java can initialize reliably under RLIMIT_AS / RLIMIT_DATA.
-    heap_mb = max(32, min(192, (effective_memory_mb * 3) // 8))
-    xms_mb = min(16, heap_mb)
-    metaspace_mb = max(32, min(96, effective_memory_mb // 4))
-    code_cache_mb = max(8, min(32, effective_memory_mb // 8))
-    initial_code_cache_mb = max(8, min(16, code_cache_mb))
-    compressed_class_space_mb = max(8, min(32, effective_memory_mb // 8))
+    if effective_memory_mb <= 320:
+        heap_mb = max(24, min(64, effective_memory_mb // 5))
+        metaspace_mb = 24
+        code_cache_mb = 8
+        compressed_class_space_mb = 8
+    elif effective_memory_mb <= 768:
+        heap_mb = max(48, min(96, effective_memory_mb // 4))
+        metaspace_mb = 32
+        code_cache_mb = 12
+        compressed_class_space_mb = 12
+    else:
+        heap_mb = max(64, min(160, effective_memory_mb // 3))
+        metaspace_mb = 48
+        code_cache_mb = 16
+        compressed_class_space_mb = 16
+
+    xms_mb = min(8, heap_mb)
+    initial_code_cache_mb = min(8, code_cache_mb)
 
     jvm_flags = [
         f'-Xms{xms_mb}m',
         f'-Xmx{heap_mb}m',
+        '-Xss256k',
         f'-XX:ReservedCodeCacheSize={code_cache_mb}m',
         f'-XX:InitialCodeCacheSize={initial_code_cache_mb}m',
         f'-XX:CompressedClassSpaceSize={compressed_class_space_mb}m',
         f'-XX:MaxMetaspaceSize={metaspace_mb}m',
         '-XX:+UseSerialGC',
         '-XX:TieredStopAtLevel=1',
+        '-XX:-UsePerfData',
         '-Xshare:off',
     ]
     classpath = shlex.quote(':'.join(classpath_entries))
