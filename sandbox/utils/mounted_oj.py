@@ -239,6 +239,32 @@ async def _compile_java(source_path: Path,
     )
 
 
+def _build_java_runtime_command(classpath_entries: List[str], memory_limit_mb: int = -1) -> str:
+    effective_memory_mb = memory_limit_mb if memory_limit_mb and memory_limit_mb > 0 else 256
+
+    # Keep JVM startup conservative so Java can initialize reliably under RLIMIT_AS / RLIMIT_DATA.
+    heap_mb = max(32, min(192, (effective_memory_mb * 3) // 8))
+    xms_mb = min(16, heap_mb)
+    metaspace_mb = max(32, min(96, effective_memory_mb // 4))
+    code_cache_mb = max(8, min(32, effective_memory_mb // 8))
+    initial_code_cache_mb = max(8, min(16, code_cache_mb))
+    compressed_class_space_mb = max(8, min(32, effective_memory_mb // 8))
+
+    jvm_flags = [
+        f'-Xms{xms_mb}m',
+        f'-Xmx{heap_mb}m',
+        f'-XX:ReservedCodeCacheSize={code_cache_mb}m',
+        f'-XX:InitialCodeCacheSize={initial_code_cache_mb}m',
+        f'-XX:CompressedClassSpaceSize={compressed_class_space_mb}m',
+        f'-XX:MaxMetaspaceSize={metaspace_mb}m',
+        '-XX:+UseSerialGC',
+        '-XX:TieredStopAtLevel=1',
+        '-Xshare:off',
+    ]
+    classpath = shlex.quote(':'.join(classpath_entries))
+    return f"java {' '.join(jvm_flags)} -cp {classpath} -ea Main"
+
+
 def _get_python_runtime_command() -> tuple[str, Dict[str, str]]:
     try:
         return 'python', get_python_rt_env('sandbox-runtime')
@@ -341,12 +367,10 @@ async def _prepare_solution_runner(language: str,
         if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
             return compile_result, None
 
-        run_command = f"java -cp {shlex.quote(':'.join(classpath_entries))} -ea Main"
-
         async def _runner(stdin_path: Path, output_path: Path, timeout: float,
                           memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
             return await _run_command_with_files(
-                run_command,
+                _build_java_runtime_command(classpath_entries, memory_limit_mb=memory_limit_mb),
                 work_dir,
                 stdin_path=stdin_path,
                 output_path=output_path,
