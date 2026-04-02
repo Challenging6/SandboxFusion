@@ -383,13 +383,15 @@ async def _prepare_solution_runner(language: str,
 
         async def _runner(stdin_path: Path, output_path: Path, timeout: float,
                           memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
+            # For Java, rely on JVM flags rather than RLIMIT_AS / RLIMIT_DATA.
+            # RLIMIT-based address-space caps are too strict for JVM startup on low-memory OJ problems.
             return await _run_command_with_files(
                 _build_java_runtime_command(classpath_entries, memory_limit_mb=memory_limit_mb),
                 work_dir,
                 stdin_path=stdin_path,
                 output_path=output_path,
                 timeout=timeout,
-                memory_limit_mb=memory_limit_mb,
+                memory_limit_mb=-1,
                 cpu_limit_s=cpu_limit_s,
             )
 
