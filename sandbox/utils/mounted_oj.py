@@ -1,6 +1,8 @@
 import json
 import os
 import shlex
+import shutil
+import sys
 import tempfile
 import math
 import signal
@@ -12,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from sandbox.configs.run_config import RunConfig
 from sandbox.runners.base import build_preexec_fn, run_command_bare
-from sandbox.runners.major import get_cpp_rt_flags
+from sandbox.runners.major import get_cpp_rt_flags, get_python_rt_env
 from sandbox.runners.types import CommandRunResult, CommandRunStatus
 from sandbox.utils.execution import get_tmp_dir
 
@@ -36,6 +38,7 @@ VERDICT_CE = 'CE'
 VERDICT_CHECKER_CE = 'CHECKER_CE'
 VERDICT_ERROR = 'ERROR'
 CPU_LIMIT_SIGNAL_RETURN_CODES = {-signal.SIGXCPU}
+SUPPORTED_MOUNTED_OJ_LANGUAGES = ('cpp', 'java', 'py3', 'python')
 
 
 class MountedOJCheckerSpec(BaseModel):
@@ -207,6 +210,177 @@ async def _run_checker_binary(checker_path: Path, cwd: Path, argv: List[str], ti
     )
 
 
+def normalize_mounted_oj_language(language: str) -> str:
+    normalized = (language or 'cpp').lower()
+    if normalized == 'py3':
+        return 'python'
+    if normalized in {'cpp', 'java', 'python'}:
+        return normalized
+    raise ValueError(
+        f'unsupported mounted OJ language: {language!r}. '
+        f'Supported values are {SUPPORTED_MOUNTED_OJ_LANGUAGES!r}'
+    )
+
+
+async def _compile_java(source_path: Path,
+                        timeout: float,
+                        cwd: Path,
+                        memory_limit_mb: int = -1,
+                        classpath_entries: Optional[List[str]] = None) -> CommandRunResult:
+    classpath_flag = ''
+    if classpath_entries:
+        classpath_flag = f" -cp {shlex.quote(':'.join(classpath_entries))}"
+    command = f'javac{classpath_flag} {shlex.quote(source_path.name)}'.strip()
+    return await run_command_bare(
+        command,
+        timeout=timeout,
+        cwd=str(cwd),
+        preexec_fn=build_preexec_fn(memory_limit_mb),
+    )
+
+
+def _get_python_runtime_command() -> tuple[str, Dict[str, str]]:
+    try:
+        return 'python', get_python_rt_env('sandbox-runtime')
+    except Exception as e:
+        fallback_python = shutil.which('python3') or shutil.which('python') or sys.executable
+        logger.warning(
+            'failed to resolve sandbox-runtime python, falling back to host python',
+            error=str(e),
+            fallback_python=fallback_python,
+        )
+        return shlex.quote(fallback_python), {}
+
+
+async def _compile_python(source_path: Path,
+                          timeout: float,
+                          cwd: Path,
+                          memory_limit_mb: int = -1) -> CommandRunResult:
+    python_command, extra_env = _get_python_runtime_command()
+    return await run_command_bare(
+        f'{python_command} -m py_compile {shlex.quote(source_path.name)}',
+        timeout=timeout,
+        cwd=str(cwd),
+        extra_env=extra_env,
+        preexec_fn=build_preexec_fn(memory_limit_mb),
+    )
+
+
+async def _run_command_with_files(command: str,
+                                  cwd: Path,
+                                  stdin_path: Path,
+                                  output_path: Path,
+                                  timeout: float,
+                                  memory_limit_mb: int = -1,
+                                  cpu_limit_s: Optional[int] = None,
+                                  extra_env: Optional[Dict[str, str]] = None) -> CommandRunResult:
+    return await run_command_bare(
+        command,
+        timeout=timeout,
+        stdin_path=str(stdin_path),
+        stdout_path=str(output_path),
+        cwd=str(cwd),
+        extra_env=extra_env,
+        preexec_fn=build_preexec_fn(memory_limit_mb, cpu_limit_s=cpu_limit_s),
+    )
+
+
+async def _prepare_solution_runner(language: str,
+                                   code: str,
+                                   work_dir: Path,
+                                   compile_timeout: float,
+                                   enable_msvc_i64_compat: bool = False) -> tuple[Optional[CommandRunResult], Optional[callable]]:
+    normalized_language = normalize_mounted_oj_language(language)
+
+    if normalized_language == 'cpp':
+        solution_src = work_dir / 'solution.cpp'
+        solution_bin = work_dir / 'solution'
+        solution_src.write_text(
+            _rewrite_cpp_legacy_stdio_formats(code, enable_msvc_i64_compat),
+            encoding='utf-8',
+        )
+        compile_result = await _compile_cpp(
+            solution_src,
+            solution_bin,
+            compile_timeout,
+            work_dir,
+            extra_flags=['-O2', '-DONLINE_JUDGE'],
+        )
+        if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
+            return compile_result, None
+
+        async def _runner(stdin_path: Path, output_path: Path, timeout: float,
+                          memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
+            return await _run_binary(
+                solution_bin,
+                work_dir,
+                stdin_path=stdin_path,
+                output_path=output_path,
+                timeout=timeout,
+                memory_limit_mb=memory_limit_mb,
+                cpu_limit_s=cpu_limit_s,
+            )
+
+        return compile_result, _runner
+
+    if normalized_language == 'java':
+        runtime_java_dir = Path(__file__).resolve().parents[2] / 'runtime' / 'java'
+        classpath_entries = ['.']
+        javatuples_jar = runtime_java_dir / 'javatuples-1.2.jar'
+        if javatuples_jar.is_file():
+            classpath_entries.append(str(javatuples_jar))
+
+        solution_src = work_dir / 'Main.java'
+        solution_src.write_text(code, encoding='utf-8')
+        compile_result = await _compile_java(
+            solution_src,
+            compile_timeout,
+            work_dir,
+            classpath_entries=classpath_entries,
+        )
+        if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
+            return compile_result, None
+
+        run_command = f"java -cp {shlex.quote(':'.join(classpath_entries))} -ea Main"
+
+        async def _runner(stdin_path: Path, output_path: Path, timeout: float,
+                          memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
+            return await _run_command_with_files(
+                run_command,
+                work_dir,
+                stdin_path=stdin_path,
+                output_path=output_path,
+                timeout=timeout,
+                memory_limit_mb=memory_limit_mb,
+                cpu_limit_s=cpu_limit_s,
+            )
+
+        return compile_result, _runner
+
+    solution_src = work_dir / 'solution.py'
+    solution_src.write_text(code, encoding='utf-8')
+    compile_result = await _compile_python(solution_src, compile_timeout, work_dir)
+    if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
+        return compile_result, None
+
+    python_command, python_extra_env = _get_python_runtime_command()
+
+    async def _runner(stdin_path: Path, output_path: Path, timeout: float,
+                      memory_limit_mb: int = -1, cpu_limit_s: Optional[int] = None) -> CommandRunResult:
+        return await _run_command_with_files(
+            f'{python_command} {shlex.quote(solution_src.name)}',
+            work_dir,
+            stdin_path=stdin_path,
+            output_path=output_path,
+            timeout=timeout,
+            memory_limit_mb=memory_limit_mb,
+            cpu_limit_s=cpu_limit_s,
+            extra_env=python_extra_env,
+        )
+
+    return compile_result, _runner
+
+
 def _run_verdict(run_result: CommandRunResult) -> str:
     if run_result.status == CommandRunStatus.TimeLimitExceeded:
         return VERDICT_TLE
@@ -350,6 +524,7 @@ async def judge_cases_from_disk(
     time_limit_multiplier: float = 1.0,
     memory_limit_mb: Optional[int] = None,
     enable_msvc_i64_compat: bool = False,
+    language: str = 'cpp',
 ) -> Tuple[MountedOJProblemSpec, Optional[CommandRunResult], Optional[CommandRunResult], List[MountedOJCaseResult]]:
     problem_dir, problem, case_map = load_problem_spec(data_root, problem_id)
     normalized_case_ids = normalize_case_ids(case_ids, problem, case_map)
@@ -364,21 +539,19 @@ async def judge_cases_from_disk(
         work_dir = Path(tmp_dir_name)
         _copy_problem_files(problem_dir, work_dir, problem.shared_files)
 
-        solution_src = work_dir / 'solution.cpp'
-        solution_bin = work_dir / 'solution'
-        solution_src.write_text(
-            _rewrite_cpp_legacy_stdio_formats(code, enable_msvc_i64_compat),
-            encoding='utf-8',
+        compile_result, solution_runner = await _prepare_solution_runner(
+            language=language,
+            code=code,
+            work_dir=work_dir,
+            compile_timeout=compile_timeout,
+            enable_msvc_i64_compat=enable_msvc_i64_compat,
         )
-        compile_result = await _compile_cpp(
-            solution_src,
-            solution_bin,
-            compile_timeout,
-            work_dir,
-            extra_flags=['-O2', '-DONLINE_JUDGE'],
-        )
-        if compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0:
+        if compile_result is not None and (
+            compile_result.status != CommandRunStatus.Finished or compile_result.return_code != 0
+        ):
             return problem, compile_result, None, _failed_case_results(normalized_case_ids, VERDICT_CE, case_map)
+        if solution_runner is None:
+            return problem, compile_result, None, _failed_case_results(normalized_case_ids, VERDICT_ERROR, case_map)
 
         checker_compile_result = None
         checker_bin = None
@@ -412,9 +585,7 @@ async def judge_cases_from_disk(
             case_dir = work_dir / f'case_{case_id}'
             checker_input_path, checker_answer_path, output_path = _prepare_case_dir(case_dir, input_path, answer_path)
 
-            run_result = await _run_binary(
-                solution_bin,
-                case_dir,
+            run_result = await solution_runner(
                 stdin_path=input_path,
                 output_path=output_path,
                 timeout=effective_run_timeout,

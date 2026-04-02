@@ -106,7 +106,9 @@ class RunMountedOJRequest(BaseModel):
         description='one or more case ids defined in problem.json, or "all" to run all cases',
     )
     code: str = Field(..., description='the code to judge')
-    language: Literal['cpp'] = Field('cpp', description='currently only cpp is supported by the mounted OJ endpoint')
+    language: Literal['cpp', 'java', 'py3', 'python'] = Field(
+        'cpp', description='supported mounted OJ languages: cpp, java, py3 (python alias accepted)'
+    )
     data_dir: Optional[str] = Field(None, description='optional override for the mounted OJ data root')
     compile_timeout: float = Field(30, description='compile timeout in seconds')
     run_timeout: Optional[float] = Field(None, description='optional per-case run timeout in seconds')
@@ -284,6 +286,7 @@ async def run_oj_cases(request: RunMountedOJRequest):
             problem_id=request.problem_id,
             case_ids=request_case_ids,
             data_dir=resp.data_dir,
+            language=request.language,
             enable_msvc_i64_compat=request.enable_msvc_i64_compat,
         )
         _, compile_result, checker_compile_result, case_results = await judge_cases_from_disk(
@@ -296,6 +299,7 @@ async def run_oj_cases(request: RunMountedOJRequest):
             time_limit_multiplier=request.time_limit_multiplier,
             memory_limit_mb=request.memory_limit_MB,
             enable_msvc_i64_compat=request.enable_msvc_i64_compat,
+            language=request.language,
         )
         resp.compile_result = compile_result
         resp.checker_compile_result = checker_compile_result

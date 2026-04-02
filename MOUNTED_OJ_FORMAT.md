@@ -55,7 +55,8 @@ The data root contains one directory per problem:
 - `checker.source`: checker source relative to the problem directory.
 - `checker.files`: extra checker-only files relative to the problem directory.
 - `test_cases[*].input` and `test_cases[*].answer`: files relative to the problem directory.
-- The endpoint currently supports `language="cpp"` and compiles the solution once per request, then runs the requested `case_ids`.
+- The endpoint supports `language="cpp"`, `language="java"`, and `language="py3"` (`python` is accepted as an alias for `py3`).
+- `cpp` and `java` compile once per request and then run the requested `case_ids`; `py3` performs a one-time syntax check and then executes the script for each requested case.
 
 ## Response semantics
 
