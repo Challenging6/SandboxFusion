@@ -17,6 +17,7 @@ from sandbox.runners.base import build_preexec_fn, run_command_bare
 from sandbox.runners.major import get_cpp_rt_flags, get_python_rt_env
 from sandbox.runners.types import CommandRunResult, CommandRunStatus
 from sandbox.utils.execution import get_tmp_dir
+from sandbox.utils.extraction import find_java_public_class_name
 
 logger = structlog.stdlib.get_logger()
 config = RunConfig.get_instance_sync()
@@ -370,7 +371,8 @@ async def _prepare_solution_runner(language: str,
         if javatuples_jar.is_file():
             classpath_entries.append(str(javatuples_jar))
 
-        solution_src = work_dir / 'Main.java'
+        class_name = find_java_public_class_name(code) or 'Main'
+        solution_src = work_dir / f'{class_name}.java'
         solution_src.write_text(code, encoding='utf-8')
         compile_result = await _compile_java(
             solution_src,
@@ -386,7 +388,7 @@ async def _prepare_solution_runner(language: str,
             # For Java, rely on JVM flags rather than RLIMIT_AS / RLIMIT_DATA.
             # RLIMIT-based address-space caps are too strict for JVM startup on low-memory OJ problems.
             return await _run_command_with_files(
-                _build_java_runtime_command(classpath_entries, memory_limit_mb=memory_limit_mb),
+                _build_java_runtime_command(classpath_entries, memory_limit_mb=memory_limit_mb).replace(' -ea Main', f' -ea {class_name}'),
                 work_dir,
                 stdin_path=stdin_path,
                 output_path=output_path,
