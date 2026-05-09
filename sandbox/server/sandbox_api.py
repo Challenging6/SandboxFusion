@@ -106,8 +106,9 @@ class RunMountedOJRequest(BaseModel):
         description='one or more case ids defined in problem.json, or "all" to run all cases',
     )
     code: str = Field(..., description='the code to judge')
-    language: Literal['cpp', 'java', 'py3', 'python'] = Field(
-        'cpp', description='supported mounted OJ languages: cpp, java, py3 (python alias accepted)'
+    language: Literal['cpp', 'java', 'py3', 'python', 'python3'] = Field(
+        'cpp',
+        description='supported mounted OJ languages: cpp, java, python3 (py3/python aliases accepted)',
     )
     data_dir: Optional[str] = Field(None, description='optional override for the mounted OJ data root')
     compile_timeout: float = Field(30, description='compile timeout in seconds')

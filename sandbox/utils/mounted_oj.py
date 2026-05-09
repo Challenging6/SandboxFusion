@@ -39,7 +39,7 @@ VERDICT_CE = 'CE'
 VERDICT_CHECKER_CE = 'CHECKER_CE'
 VERDICT_ERROR = 'ERROR'
 CPU_LIMIT_SIGNAL_RETURN_CODES = {-signal.SIGXCPU}
-SUPPORTED_MOUNTED_OJ_LANGUAGES = ('cpp', 'java', 'py3', 'python')
+SUPPORTED_MOUNTED_OJ_LANGUAGES = ('cpp', 'java', 'py3', 'python', 'python3')
 
 
 class MountedOJCheckerSpec(BaseModel):
@@ -213,7 +213,7 @@ async def _run_checker_binary(checker_path: Path, cwd: Path, argv: List[str], ti
 
 def normalize_mounted_oj_language(language: str) -> str:
     normalized = (language or 'cpp').lower()
-    if normalized == 'py3':
+    if normalized in {'py3', 'python3'}:
         return 'python'
     if normalized in {'cpp', 'java', 'python'}:
         return normalized
